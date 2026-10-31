@@ -30,6 +30,17 @@ struct Request {
 }
 
 /// index 0 = 喵喵，1 = 喵喵_游戏内高音调；volume 0..1。
+/// 播放磁盘上的 wav 文件（TTS 用），异步不阻塞。
+pub fn play_file(path: &str) {
+    unsafe {
+        const SND_FILENAME: u32 = 0x20000;
+        const SND_ASYNC: u32 = 0x1;
+        const SND_NODEFAULT: u32 = 0x2;
+        let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        PlaySoundW(wide.as_ptr(), std::ptr::null_mut(), SND_ASYNC | SND_FILENAME | SND_NODEFAULT);
+    }
+}
+
 pub fn play(index: usize, volume: f32) {
     let volume = volume.clamp(0., 1.);
     if volume <= 0.001 {

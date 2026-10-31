@@ -1,5 +1,8 @@
 #![windows_subsystem = "windows"]
 mod autostart;
+mod bridge;
+mod bubble;
+mod companion;
 mod config;
 mod hyp_chat;
 mod keyboard;
@@ -264,6 +267,8 @@ pub struct App {
     click_count: u64,
     /// PAT喵！音效用的随机数状态（xorshift64）；每次点击随机二选一，不再按顺序循环。
     pat_rng: u64,
+    last_left_click: f32,
+    dbg_dumps: u32,
     mouse_buttons: [bool; 5],
     tray_ok: bool,
     tray_error: u32,
@@ -349,6 +354,8 @@ impl App {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0x9E37_79B9_7F4A_7C15)
                 | 1,
+            last_left_click: 0.,
+            dbg_dumps: 0,
             mouse_buttons: [false; 5],
             tray_ok: false,
             tray_error: 0,
@@ -488,6 +495,10 @@ impl App {
         let raster_start = Instant::now();
         self.frame
             .draw_ext(&self.settings, &self.skin, self.cape.as_ref(), &self.pose);
+        // 陪伴气泡：画在光栅化之后、上屏之前（覆盖在画面顶部）
+        if let Some((text, wood, ink)) = bubble::current() {
+            bubble::draw(&mut self.frame, &text, &wood, ink);
+        }
         self.advance_opacity();
         self.raster_us += raster_start.elapsed().as_micros() as u64;
         let present_start = Instant::now();
@@ -496,16 +507,50 @@ impl App {
         }
         self.present_us += present_start.elapsed().as_micros() as u64;
         self.render_count += 1;
+        // 抽搐诊断连拍：点击后 1.2s 内逐帧转储 + 姿态数值
+        if self.dbg_dumps > 0 {
+            self.dbg_dumps -= 1;
+            let idx = 14 - self.dbg_dumps;
+            let img = image::RgbaImage::from_fn(self.frame.width as u32, self.frame.height as u32, |x, y| {
+                let off = ((y as usize * self.frame.width) + x as usize) * 4;
+                image::Rgba([
+                    self.frame.pixels[off + 2],
+                    self.frame.pixels[off + 1],
+                    self.frame.pixels[off],
+                    self.frame.pixels[off + 3],
+                ])
+            });
+            let path = std::env::temp_dir().join(format!("xiaoya-dump-{:02}.png", idx));
+            let _ = img.save(&path);
+            bridge::log(&format!(
+                "frame {:02}: swing={:?} p={:.2} yaw={:.2} pitch={:.2} squash={:.3} bodyYaw={:.2}",
+                idx, self.pose.swing_start, self.pose.swing_progress, self.pose.yaw,
+                self.pose.pitch, self.pose.squash, self.pose.body_yaw
+            ));
+        }
     }
     unsafe fn mouse_press(&mut self,index:usize,cursor:POINT,now:f32) {
         self.click_count+=1;
         let hit = self.pet_hit(cursor);
-        if index == 0 && hit { self.hold.press(now, cursor); }
+        if index == 0 && hit {
+            // （按用户要求关闭摸头/长按手部功能，hold 不再触发）
+            // 双击（0.4s 内两次左键点中桌宠）：只向陪伴大脑要一句话。
+            // 不 reset、不新起挥手——让第一次的挥手自然播完，避免急拉急停的抽搐。
+            self.dbg_dumps = 14;   // 点击后连拍 ~1.2s，诊断"抽搐"形态
+            bridge::log(&format!("mp: hit=true now={:.2} last={:.2}", now, self.last_left_click));
+            if now - self.last_left_click < 0.4 {
+                self.last_left_click = 0.;
+                companion::poke();
+                self.wake();
+                return;
+            }
+            self.last_left_click = now;
+        }
+        // 点击不再触发挥手动画（原版攻击挥臂读感为抽搐，按用户要求移除）。
+        // 双击的陪伴对话保留（见上方双击分支）。
         if self.settings.tease_enabled && hit {
-            // 「可调戏」：任何键按下先做一次 Q 弹压缩；只有左键继续等待长按。
             self.pose.tease(now);
         }
-        else {self.pose.click(now,self.settings.swing_left(index));}
         // PAT喵！：点击桌宠时短促地出一只手，并随机播放两段喵喵音效之一。
         if self.settings.pat_enabled && hit {
             self.pose.pat(now);
@@ -600,6 +645,7 @@ impl App {
         self.tick_last = clock;
         self.poll_download();
         self.poll_update();
+        companion::tick();
         self.music.set_enabled(self.settings.music_notes);
         self.pose.music_playing = self.music.playing();
         self.maintain_topmost(clock);
@@ -623,6 +669,10 @@ impl App {
         }
         let mut cursor = POINT { x: 0, y: 0 };
         GetCursorPos(&mut cursor);
+        // 气泡到期：补一次重绘把残留擦掉（空闲时没有其他变化也不会重画）
+        if bubble::should_redraw() {
+            self.wake();
+        }
         // Poll the buttons instead of installing WH_MOUSE_LL. A low-level mouse
         // hook runs synchronously on its installing thread, so every cursor
         // sample would wait for the current frame and the whole desktop would
@@ -1412,6 +1462,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             a.show_panel();
             0
         }
+        m if m == bridge::BRIDGE_MSG => {
+            // 联动事件：say=显示气泡；msg/reply=挥手打招呼。
+            let now = a.start.elapsed().as_secs_f32();
+            let events = bridge::take_events();
+            bridge::log(&format!(
+                "wndproc: {} 条事件, pet pos=({},{}) win={}x{}, awake至{:.2}",
+                events.len(), a.pos.x, a.pos.y, a.width, a.height, a.awake
+            ));
+            for (kind, text, secs) in events {
+                if !text.is_empty() {
+                    // say=陪伴语；msg/reply=QQ 消息与回复（加 💬 前缀区分）
+                    let shown = if kind == "say" { text } else { format!("💬 {text}") };
+                    let dur = if secs > 0. { secs } else { 4.5 + shown.chars().count() as f64 * 0.12 };
+                    bridge::log(&format!("wndproc: bubble::show {:?} dur={}", shown, dur));
+                    bubble::show(&shown, dur);
+                } else {
+                    a.pose.click(now, false);
+                }
+            }
+            a.wake();
+            0
+        }
         SNAPSHOT_MSG => {
             if a.diagnostic {
                 ui::diagnostic_snapshot(a);
@@ -1577,6 +1649,10 @@ fn main() {
             ));
             return;
         }
+        // AstrBot 联动收口：127.0.0.1:9528 收桥接脚本推送的联动事件。
+        bridge::spawn(hwnd);
+        // 陪伴大脑：读数据目录的 companion.json，进程内跑 LLM 陪伴。
+        companion::init(&dir);
         app.hwnd = hwnd;
         PET_HWND = hwnd;
         DragAcceptFiles(hwnd, 1);
@@ -1654,7 +1730,7 @@ fn main() {
             let wait = if !app.hidden && now <= app.awake as f64 {
                 (app.next_draw - now).min(poll).max(0.0001)
             } else {
-                poll
+                poll.max(0.05) // 空闲省电：睡眠时循环最多 20Hz，CPU 降至 1/6
             };
             if !timer.is_null() {
                 let due = -((wait * 10_000_000.).ceil() as i64).max(1);

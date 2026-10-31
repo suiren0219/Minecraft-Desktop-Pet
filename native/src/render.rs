@@ -390,7 +390,7 @@ fn cover_cheeks(parts: &mut [BoxPart], head_index: usize, arm_start: usize, laye
         for layer in 0..layers { parts[first + layer].transform = transform; }
     }
 }
-const SWING_SECONDS: f32 = 0.30; // Vanilla attack animation: six ticks at 20 ticks/s.
+const SWING_SECONDS: f32 = 0.80; // 点击挥手：从原版 0.3s 急速抽鞭放慢为柔和挥手
 // 「可调戏」：短按的 Q 弹压缩 + 长按的手部揉捏循环。所有时间都由 now 求值，
 // 不累加状态，掉帧/休眠后仍然连续。
 const PAT_SECONDS: f32 = 0.5; // 点击压缩总时长
@@ -425,13 +425,16 @@ pub struct Pose {
     pub crouch: f32,
     pub yaw: f32,
     pub pitch: f32,
+    /// 头部跟随的平滑值（指数趋近目标角），抑制光标抖动带来的抽搐。
+    yaw_s: f32,
+    pitch_s: f32,
     pub arms: [Quat; 2],
     pub head_rotation: Quat,
     arms_initialized: bool,
     hands: [Hand; 2],
     held: Vec<HeldKey>,
     typing_arms: [Quat; 2],
-    swing_start: Option<f32>,
+    pub swing_start: Option<f32>,
     swing_from: Quat,
     swing_side: usize,
     squash_start: Option<f32>,
@@ -532,6 +535,8 @@ impl Pose {
             crouch: 0.,
             yaw: front_yaw(),
             pitch: 0.,
+            yaw_s: front_yaw(),
+            pitch_s: 0.,
             arms: [rotation(-0.035, 0., 0.105), rotation(-0.035, 0., -0.105)],
             head_rotation: rotation(0., front_yaw(), 0.),
             arms_initialized: false,
@@ -736,8 +741,12 @@ impl Pose {
         self.feed_start=Some(now); self.reset_swing();
     }
     pub fn click(&mut self, now: f32, left: bool) {
+        render_log("pose.click: enter");
         self.gesture_input(now);
-        if self.tease_start.is_some() {return;}
+        if self.tease_start.is_some() {
+            render_log("pose.click: tease_start 早退");
+            return;
+        }
         let side = if left { 0 } else { 1 };
         if side != self.swing_side {
             self.reset_swing();
@@ -749,6 +758,7 @@ impl Pose {
         self.swing_progress = 0.;
         self.body_yaw = 0.;
         self.swing_from = self.typing_arms[side];
+        render_log("pose.click: swing 已置位");
     }
     pub fn reset_swing(&mut self) {
         self.swing_start = None;
@@ -853,7 +863,10 @@ impl Pose {
         self.hand_alpha = hand_alpha;
         self.hand_pop = hand_pop;
         self.holding = self.hold_start.is_some();
-        self.squash = typing_squash * hand_squash;
+        // 揉捏压缩阻尼：素材里的 14% 逐帧脉冲在 16fps 下读感是抽搐，
+        // 保留韵律但把幅度压到 ~5%。
+        let damped_hand = 1. + (hand_squash - 1.) * 0.35;
+        self.squash = typing_squash * damped_hand;
         // 眨眼只依赖时间轴，和姿势、敲字、挥动互不干预。
         // `eyelid` 还要乘上材质包的 `eye_top.ty` 开合（见下面的 `var.nov1` 一段）。
         let closure = self.blink_at(now);
@@ -908,8 +921,17 @@ impl Pose {
             .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
         let vertical =
             (s.head_center_y.to_radians() + y).clamp(-85f32.to_radians(), 85f32.to_radians());
-        self.yaw = front_yaw() + horizontal;
-        self.pitch = vertical;
+        // 跟随防抖：中心死区 + 指数平滑。光标在颈部附近或小幅抖动时，
+        // 目标角不再逐帧直通，头部转动保持连续。
+        const FOLLOW_DEADZONE: f32 = 0.006;
+        let idle = dx.abs() < FOLLOW_DEADZONE && dy.abs() < FOLLOW_DEADZONE;
+        if !idle {
+            let k = 1. - (-dt * 14.).exp();
+            self.yaw_s += (horizontal - self.yaw_s) * k;
+            self.pitch_s += (vertical - self.pitch_s) * k;
+        }
+        self.yaw = front_yaw() + self.yaw_s;
+        self.pitch = self.pitch_s;
         // Only the periodic blink changes the eye patch. Looking down never closes it.
         self.pupil = Vec2::ZERO;
         self.eyelid = if s.da_blink { 1. - closure } else { 1. };
@@ -934,8 +956,8 @@ impl Pose {
         self.leg_slide = -12. * t.sin() * i;
         if s.track_mouse {
             let desired = view
-                * Quat::from_rotation_y(horizontal)
-                * Quat::from_rotation_x(vertical)
+                * Quat::from_rotation_y(self.yaw_s)
+                * Quat::from_rotation_x(self.pitch_s)
                 * Quat::from_rotation_z(self.head_roll)
                 * Quat::from_rotation_x(self.head_nod);
             let parent = degrees(&s.model_rotation)
@@ -991,7 +1013,9 @@ impl Pose {
                     key_z + k.map(|v| v.y).unwrap_or(-0.65),
                 );
                 if !active {
-                    target.y += 0.65;
+                    // 悬停位相对按键面只抬一点点；原来跳到固定世界坐标 11.85，
+                    // 在自定义姿态下会落在脸的高度，切换时手臂"唰"地举起。
+                    target.y = key_y + 0.55;
                     target.z = idle_z;
                 }
                 let arm_body = if s.posture == "custom" {
@@ -1002,10 +1026,19 @@ impl Pose {
                     body
                 };
                 let shoulder = arm_body.transform_point3(Vec3::new(sign * shoulder_x, shoulder_y, 0.));
+                // 打字手臂不再横跨键盘追按键：水平 reach 从肩部钳制
+                let reach_x = (target.x - shoulder.x).clamp(-1.6, 1.6);
+                target.x = shoulder.x + reach_x;
                 let dir = arm_body
                     .inverse()
                     .transform_vector3(target - shoulder)
                     .normalize();
+                let mut dir = dir;
+                if dir.y > -0.15 {
+                    // 手臂不许翻到肩线以上：防 from_rotation_arc 在奇异附近翻转过顶
+                    dir.y = -0.15;
+                    dir = dir.normalize();
+                }
                 let typing = if s.chibi { chibi_typing_rotation(s, self, side, k, active) } else { Quat::from_rotation_arc(-Vec3::Y, dir) };
                 typing_target = typing;
                 rest = rest.slerp(typing, self.sit);
@@ -1033,7 +1066,7 @@ impl Pose {
                 // actual arm, never from a blend whose endpoint just changed.
                 self.typing_arms[side] = if self.arms_initialized {
                     self.typing_arms[side]
-                        .slerp(target, 1. - (-dt * 22.).exp())
+                        .slerp(target, 1. - (-dt * 10.).exp())
                         .normalize()
                 } else {
                     target
@@ -1059,7 +1092,8 @@ impl Pose {
             // this renderer uses upward Y and forward +Z. X angles stay unchanged,
             // while Y/Z angles reverse. Keep the punch directed forward and inward.
             let eased = 1. - (1. - p).powi(4);
-            let strike = (eased * pi).sin() * 1.2 + (p * pi).sin() * -(self.pitch - 0.7) * 0.75;
+            let strike = ((eased * pi).sin() * 0.55 + (p * pi).sin() * -(self.pitch - 0.7) * 0.30)
+                .clamp(-0.55, 0.55);
             // Seated swings start above the keyboard. Using the standing rest angle
             // here would sweep the wrist down through the board on the return stroke.
             let base_pitch = if self.sit > 0.001 || s.posture == "custom" {
@@ -1076,7 +1110,9 @@ impl Pose {
                 let entering = self.swing_from.slerp(attack, smooth(p / 0.16));
                 self.arms[side] = entering.slerp(self.typing_arms[side], smooth((p - 0.60) / 0.40));
             } else {
-                self.arms[side] = attack;
+                // 站姿挥击也走 10% 的入场过渡，避免第一帧手臂瞬移的顿挫。
+                let entering = self.arms[side].slerp(attack, smooth(p / 0.25));
+                self.arms[side] = entering;
             }
         }
         self.feed_blend=0.;
@@ -1460,6 +1496,15 @@ fn parts_with_cape(
 
 /// Q 版(图腾玩偶)模式：用 Q 版 cuboid + 标准皮肤贴图，挂到现有骨骼动画上。
 /// 复用 Pose 的角度，但髋高度、身体尺寸、肩/髋 pivot 按 Q 版比例。
+
+/// 诊断日志（与 bridge::log 同一文件；render 在 lib 分区拿不到 bin 的 bridge）。
+fn render_log(msg: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("xiaoya-pet-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[{:?}] {}", std::time::SystemTime::now(), msg);
+    }
+}
 fn chibi_typing_rotation(s: &Settings, pose: &Pose, side: usize, key: Option<Vec2>, active: bool) -> Quat {
     let sign = if side == 0 { 1. } else { -1. };
     let custom = if s.posture == "custom" { Mat4::from_quat(degrees(&s.active_custom_pose().body)) } else { Mat4::IDENTITY };
