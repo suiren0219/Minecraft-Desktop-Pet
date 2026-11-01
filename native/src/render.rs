@@ -843,6 +843,7 @@ impl Pose {
         };
         let (mut hand_frame, mut hand_alpha, mut hand_pop, mut hand_squash) =
             self.hold_state(now);
+        hand_alpha = 0.; // 摸头手贴图按用户要求隐藏（hold 计时逻辑保留作拖拽门闩）
         if self.hold_release.is_some_and(|r| now - r >= HOLD_EXIT) {
             self.hold_release = None;
         }
@@ -1126,6 +1127,27 @@ impl Pose {
             let eating=rotation(-0.3-1.12*lift+chew*0.045,0.,0.40*lift);
             self.arms[1]=self.arms[1].slerp(eating,weight);
             self.head_rotation=self.head_rotation.slerp(rotation(0.06*lift+chew*0.025,0.,0.),weight);
+        }
+        // 抽搐记录仪：10Hz 全量姿态数值（纯文本零开销），复现时凭签名指认动画
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_LOG: AtomicU64 = AtomicU64::new(0);
+            let now_ms = (now * 1000.0) as u64;
+            let last = LAST_LOG.load(Ordering::Relaxed);
+            if now_ms.saturating_sub(last) >= 100 {
+                LAST_LOG.store(now_ms, Ordering::Relaxed);
+                let (ax, ay, az) = self.arms[0].to_euler(EulerRot::XYZ);
+                let (bx, by, bz) = self.arms[1].to_euler(EulerRot::XYZ);
+                render_log(&format!(
+                    "pose t={:.2} yaw={:.3} pitch={:.3} sit={:.2} squash={:.3} bodyRoll={:.3} bodyYaw={:.3} headRoll={:.3} headNod={:.3} armRoll={:.3} armSlide={:.3} armBob={:.3} L=({:.2},{:.2},{:.2}) R=({:.2},{:.2},{:.2}) dance={:.2} typingL={:.3} typingR={:.3}",
+                    now, self.yaw, self.pitch, self.sit, self.squash, self.body_roll,
+                    self.body_yaw, self.head_roll, self.head_nod, self.arm_roll,
+                    self.arm_slide, self.arm_bob, ax, ay, az, bx, by, bz,
+                    self.dance,
+                    self.typing_arms[0].to_euler(EulerRot::XYZ).0,
+                    self.typing_arms[1].to_euler(EulerRot::XYZ).0
+                ));
+            }
         }
         // Additive overlays start from this frame's live base pose, never last
         // frame's offset; held keys and edited custom poses remain authoritative.

@@ -510,7 +510,9 @@ impl App {
         self.click_count+=1;
         let hit = self.pet_hit(cursor);
         if index == 0 && hit {
-            // （按用户要求关闭摸头/长按手部功能，hold 不再触发）
+            // hold.press 必须保留：它是拖拽门闩（按住 0.5s 才允许拖动桌宠）。
+            // 之前移除它导致每次点击瞬间进入拖拽跟随，手的微颤直接拉着窗口抖。
+            self.hold.press(now, cursor);
             // 双击（0.4s 内两次左键点中桌宠）：只向陪伴大脑要一句话。
             // 不 reset、不新起挥手——让第一次的挥手自然播完，避免急拉急停的抽搐。
             bridge::log(&format!("mp: hit=true now={:.2} last={:.2}", now, self.last_left_click));
