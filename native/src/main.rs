@@ -268,7 +268,6 @@ pub struct App {
     /// PAT喵！音效用的随机数状态（xorshift64）；每次点击随机二选一，不再按顺序循环。
     pat_rng: u64,
     last_left_click: f32,
-    dbg_dumps: u32,
     mouse_buttons: [bool; 5],
     tray_ok: bool,
     tray_error: u32,
@@ -355,7 +354,6 @@ impl App {
                 .unwrap_or(0x9E37_79B9_7F4A_7C15)
                 | 1,
             last_left_click: 0.,
-            dbg_dumps: 0,
             mouse_buttons: [false; 5],
             tray_ok: false,
             tray_error: 0,
@@ -507,27 +505,6 @@ impl App {
         }
         self.present_us += present_start.elapsed().as_micros() as u64;
         self.render_count += 1;
-        // 抽搐诊断连拍：点击后 1.2s 内逐帧转储 + 姿态数值
-        if self.dbg_dumps > 0 {
-            self.dbg_dumps -= 1;
-            let idx = 14 - self.dbg_dumps;
-            let img = image::RgbaImage::from_fn(self.frame.width as u32, self.frame.height as u32, |x, y| {
-                let off = ((y as usize * self.frame.width) + x as usize) * 4;
-                image::Rgba([
-                    self.frame.pixels[off + 2],
-                    self.frame.pixels[off + 1],
-                    self.frame.pixels[off],
-                    self.frame.pixels[off + 3],
-                ])
-            });
-            let path = std::env::temp_dir().join(format!("xiaoya-dump-{:02}.png", idx));
-            let _ = img.save(&path);
-            bridge::log(&format!(
-                "frame {:02}: swing={:?} p={:.2} yaw={:.2} pitch={:.2} squash={:.3} bodyYaw={:.2}",
-                idx, self.pose.swing_start, self.pose.swing_progress, self.pose.yaw,
-                self.pose.pitch, self.pose.squash, self.pose.body_yaw
-            ));
-        }
     }
     unsafe fn mouse_press(&mut self,index:usize,cursor:POINT,now:f32) {
         self.click_count+=1;
@@ -536,7 +513,6 @@ impl App {
             // （按用户要求关闭摸头/长按手部功能，hold 不再触发）
             // 双击（0.4s 内两次左键点中桌宠）：只向陪伴大脑要一句话。
             // 不 reset、不新起挥手——让第一次的挥手自然播完，避免急拉急停的抽搐。
-            self.dbg_dumps = 14;   // 点击后连拍 ~1.2s，诊断"抽搐"形态
             bridge::log(&format!("mp: hit=true now={:.2} last={:.2}", now, self.last_left_click));
             if now - self.last_left_click < 0.4 {
                 self.last_left_click = 0.;

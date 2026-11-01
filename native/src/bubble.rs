@@ -3,6 +3,7 @@
 //! frame.pixels 为 BGRA（第 4 字节 alpha），气泡像素全部 alpha=255，规避预乘问题。
 
 use std::ptr::null_mut;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -75,7 +76,8 @@ fn planks(name: &str) -> &'static PlanksTex {
 }
 
 struct Bubble {
-    text: String,
+    segs: VecDeque<String>,   // 分段队列：长回复按句切分逐段播
+    seg_secs: f64,            // 每段停留时长
     until: Instant,
     wood: String,
     ink: [u8; 3],
@@ -83,16 +85,45 @@ struct Bubble {
 
 static SHOWN: Mutex<Option<Bubble>> = Mutex::new(None);
 
+/// 长文本按句切分：优先在 。！？； 处断，每段不超过 60 字。
+fn split_segments(text: &str) -> VecDeque<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= 60 {
+        return VecDeque::from([text.to_string()]);
+    }
+    let mut segs = Vec::new();
+    let mut buf = String::new();
+    for c in chars {
+        buf.push(c);
+        if buf.chars().count() >= 55 && "。！？；，、".contains(c) {
+            segs.push(buf.trim().to_string());
+            buf.clear();
+        } else if buf.chars().count() >= 62 {
+            segs.push(buf.trim().to_string());
+            buf.clear();
+        }
+    }
+    if !buf.trim().is_empty() {
+        segs.push(buf.trim().to_string());
+    }
+    VecDeque::from(segs)
+}
+
 /// 显示一段文本；秒数随长度自适应。材质/文字色读 companion.json。
 pub fn show(text: &str, secs: f64) {
     let (wood, ink) = crate::companion::visual();
-    // 保险上限：任何来源的文本都不超过 120 字（清洗失败也不会刷屏）
-    let text: String = text.chars().take(120).collect();
-    crate::bridge::log(&format!("bubble::show: {:?} wood={} ink={:?}", text, wood, ink));
-    let secs = if secs > 0.0 { secs } else { 4.5 };
+    let segs = split_segments(text);
+    crate::bridge::log(&format!(
+        "bubble::show: {:?} wood={} ink={:?} 段数={}",
+        segs.front(), wood, ink, segs.len()
+    ));
+    let seg_secs = if secs > 0.0 { secs } else { 4.5 };
+    let until = Instant::now()
+        + Duration::from_secs_f64((seg_secs * segs.len() as f64).min(30.0));
     *SHOWN.lock().unwrap() = Some(Bubble {
-        text: text.to_string(),
-        until: Instant::now() + Duration::from_secs_f64(secs.min(20.0)),
+        segs,
+        seg_secs,
+        until,
         wood,
         ink,
     });
@@ -102,14 +133,21 @@ pub fn current() -> Option<(String, String, [u8; 3])> {
     let g = SHOWN.lock().unwrap();
     g.as_ref()
         .filter(|b| Instant::now() < b.until)
-        .map(|b| (b.text.clone(), b.wood.clone(), b.ink))
+        .map(|b| (b.segs.front().cloned().unwrap_or_default(), b.wood.clone(), b.ink))
 }
 
-/// 到期后返回 true 一次（提示主循环补一次重绘把气泡擦掉）。
+/// 当前段到期：还有下一段就滚到下一段并返回 true（换内容重绘）；
+/// 全部播完则清空并返回 true（擦除重绘）。
 pub fn should_redraw() -> bool {
     let mut g = SHOWN.lock().unwrap();
-    if let Some(b) = g.as_ref() {
+    if let Some(b) = g.as_mut() {
         if Instant::now() >= b.until {
+            b.segs.pop_front();
+            if !b.segs.is_empty() {
+                b.until = Instant::now()
+                    + Duration::from_secs_f64(b.seg_secs * (b.segs.front().map(|s| s.chars().count()).unwrap_or(10) as f64).max(3.0) / 10.0);
+                return true;
+            }
             *g = None;
             return true;
         }
