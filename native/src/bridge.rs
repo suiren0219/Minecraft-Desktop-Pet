@@ -19,6 +19,12 @@ pub const BRIDGE_MSG: u32 = WM_APP + 14;
 pub fn log(msg: &str) {
     use std::io::Write;
     let path = std::env::temp_dir().join("xiaoya-pet-debug.log");
+    // 轮转：超 1MB 归档为 .log.1，防无限增长
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 1_000_000 {
+            let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        }
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

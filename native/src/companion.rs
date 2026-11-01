@@ -599,6 +599,18 @@ fn feed_loop(feed_base: String, key: String) {
         let path_qs = format!("/events?key={key}&since={since}");
         match http_get(&feed_base, &path_qs) {
             Ok(body) => {
+                // 非 JSON 响应可见化（插件未装/端口被 nginx 占用等），每 100s 记一条防刷屏
+                if !body.trim_start().starts_with('{') {
+                    static BAD: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let n = BAD.fetch_add(1, Ordering::Relaxed);
+                    if n % 40 == 0 {
+                        bridge::log(&format!(
+                            "feed: 非 JSON 响应（插件未安装/端口被占用？）前80字: {}",
+                            body.chars().take(80).collect::<String>()
+                        ));
+                    }
+                }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
                     if let Some(list) = v.get("events").and_then(|e| e.as_array()) {
                         for e in list {
