@@ -1065,6 +1065,18 @@ impl App {
             167 => { self.settings.typing_letters = !self.settings.typing_letters; self.changed(); }
             168 => { self.pose.feed(self.start.elapsed().as_secs_f32()); self.wake(); }
             169 => { self.open_github(false); }
+            186 => {
+                let (on, _, _) = companion::switches();
+                companion::set_flag("enabled", !on);
+            }
+            187 => {
+                let (_, on, _) = companion::switches();
+                companion::set_flag("auto", !on);
+            }
+            188 => {
+                let (_, _, on) = companion::switches();
+                companion::set_flag("poke", !on);
+            }
             170 => { self.check_update(); }
             171 => { self.settings.music_notes = !self.settings.music_notes; self.changed(); }
             172 => { self.settings.tease_enabled = !self.settings.tease_enabled; self.changed(); }
@@ -1130,6 +1142,13 @@ impl App {
         submenu("触发动作", &[
             (178,"打招呼",false),(179,"开心蹦蹦",false),
             (180,"害羞",false),(181,"鼓掌",false),(168,"喂食苹果",false),
+        ]);
+        let (llm_on, auto_on, poke_on) = companion::switches();
+        submenu(&format!("陪伴：{}", if llm_on { "开" } else { "关" }), &[
+            (186, "启用陪伴（AstrBot）", llm_on),
+            (0, "", false),
+            (187, "自动搭话：切窗口 / 发呆 / 定时", auto_on),
+            (188, "双击对话：读剪贴板回应", poke_on),
         ]);
         append(menu, 0, "", false);
         let posture = match self.settings.posture.as_str() {

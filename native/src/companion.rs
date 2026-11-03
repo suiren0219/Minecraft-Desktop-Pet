@@ -197,6 +197,52 @@ fn cfg_flag(key: &str, default: bool) -> bool {
     v.get(key).and_then(|x| x.as_bool()).unwrap_or(default)
 }
 
+/// 运行时开关缓存：(读盘时刻, 总开关, 自动搭话, 双击对话)
+static SW: Mutex<Option<(Instant, bool, bool, bool)>> = Mutex::new(None);
+
+/// 三个 LLM 开关，缓存 2 秒（主循环每帧都会问一次，不能真读盘）。
+/// enabled=总开关，auto=切窗口/发呆/定时主动搭话，poke=双击对话。
+pub fn switches() -> (bool, bool, bool) {
+    let mut g = SW.lock().unwrap();
+    if let Some((t, m, a, p)) = *g {
+        if t.elapsed() < Duration::from_secs(2) {
+            return (m, a, p);
+        }
+    }
+    let v = (
+        cfg_flag("enabled", true),
+        cfg_flag("auto", true),
+        cfg_flag("poke", true),
+    );
+    *g = Some((Instant::now(), v.0, v.1, v.2));
+    v
+}
+
+/// 改一个开关并写回 companion.json（其它字段原样保留）。
+pub fn set_flag(key: &str, value: bool) {
+    let dir = DATA_DIR.lock().unwrap().clone();
+    let Some(dir) = dir else { return };
+    let path = dir.join("companion.json");
+    let mut v: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(key.to_string(), json!(value));
+    }
+    match serde_json::to_string_pretty(&v) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&path, text) {
+                bridge::log(&format!("companion: 写 companion.json 失败 {e}"));
+            }
+        }
+        Err(e) => bridge::log(&format!("companion: 序列化失败 {e}")),
+    }
+    *SW.lock().unwrap() = None;
+    let (m, a, p) = switches();
+    bridge::log(&format!("companion: {key}={value} → 总{m} 自动{a} 双击{p}"));
+}
+
 /// 气泡视觉配置：木板材质 + 文字颜色。每次冒气泡时读一次，改配置即生效。
 pub fn visual() -> (String, [u8; 3]) {
     let mut wood = "oak".to_string();
@@ -308,6 +354,12 @@ pub fn tick() {
     *last_eval = Some(Instant::now());
     drop(last_eval);
 
+    // 自动搭话开关：关掉后不再消耗任何 token（双击对话另算）
+    let (master, auto, _) = switches();
+    if !master || !auto {
+        return;
+    }
+
     let hhmm = now_secs();
     let (proc, title) = foreground();
     let idle = idle_seconds();
@@ -374,6 +426,10 @@ pub fn tick() {
 /// 双击桌宠：思考反馈 →（可选）读剪贴板作为用户的话 → LLM → 气泡 + TTS。
 pub fn poke() {
     if !enabled() || BUSY.load(Ordering::Relaxed) {
+        return;
+    }
+    let (master, _, poke_on) = switches();
+    if !master || !poke_on {
         return;
     }
     BUSY.store(true, Ordering::Relaxed);
