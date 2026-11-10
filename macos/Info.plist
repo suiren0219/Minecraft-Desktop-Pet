@@ -15,5 +15,5 @@
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSSupportsAutomaticTermination</key><false/>
 <key>NSSupportsSuddenTermination</key><false/>
-<key>NSHumanReadableCopyright</key><string>MIT. Independent fan project; not affiliated with Mojang or Microsoft.</string>
+<key>NSHumanReadableCopyright</key><string>AGPL-3.0. Independent fan project; not affiliated with Mojang or Microsoft.</string>
 </dict></plist>

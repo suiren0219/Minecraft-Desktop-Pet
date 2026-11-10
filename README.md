@@ -73,4 +73,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Action te
 
 ## 许可
 
-应用代码及项目原创示例皮肤采用 [MIT License](LICENSE)。依赖许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和 `native/licenses/`。用户导入的皮肤不受本项目许可证覆盖，请尊重原作者授权。
+应用代码及项目原创示例皮肤采用 **[GNU Affero General Public License v3.0](LICENSE)**（AGPL-3.0）开源。
+
+简单说：你可以自由使用、学习、修改、分发（含商业用途），但**分发修改版，或以网络服务形式向他人提供本应用（含修改版）时，必须同样以 AGPL-3.0 公开完整对应源代码**。协议全文见 [LICENSE](LICENSE)。
+
+依赖许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和 `native/licenses/`，各自保持原协议。用户导入的皮肤不受本项目许可证覆盖，请尊重原作者授权。
